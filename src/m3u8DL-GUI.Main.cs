@@ -1,3 +1,5 @@
+// m3u8DL-GUI —— 图形界面外壳
+// 下载引擎（N_m3u8DL-CLI-engine.exe）来自原作者 nilaoda，遵循 MIT 许可证。
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -11,11 +13,14 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-namespace N_m3u8DL_Gui
+namespace M3u8DlGui
 {
     internal static class Program
     {
         private static readonly object LogMoveLock = new object();
+
+        /// <summary>用户自定义的 ffmpeg 目录；为空表示用软件目录内的那份。</summary>
+        internal static string CustomFfmpegDir = "";
 
         [STAThread]
         private static void Main(string[] args)
@@ -71,8 +76,8 @@ namespace N_m3u8DL_Gui
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    "无法启动下载引擎：\r\n" + ex.Message,
-                    "N_m3u8DL",
+                    Lang.Translate("无法启动下载引擎：") + "\r\n" + ex.Message,
+                    "m3u8DL-GUI",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
                 return -1;
@@ -91,30 +96,60 @@ namespace N_m3u8DL_Gui
             }
         }
 
+        /// <summary>引擎所在目录：新布局在 runtime\，旧布局退回根目录。</summary>
+        internal static string RuntimeDir()
+        {
+            string root = AppDir();
+            string runtime = Path.Combine(root, "runtime");
+            if (Directory.Exists(runtime))
+            {
+                return runtime;
+            }
+            return root;
+        }
+
         internal static string EnginePath()
         {
             string root = AppDir();
-            string engine = Path.Combine(root, "N_m3u8DL-CLI-engine.exe");
-            if (File.Exists(engine))
+            string[] candidates = new string[]
             {
-                return engine;
-            }
-
-            engine = Path.Combine(root, "bin", "N_m3u8DL-CLI-engine.exe");
-            if (File.Exists(engine))
+                Path.Combine(root, "runtime", "N_m3u8DL-CLI-engine.exe"),
+                Path.Combine(root, "N_m3u8DL-CLI-engine.exe"),
+                Path.Combine(root, "bin", "N_m3u8DL-CLI-engine.exe")
+            };
+            for (int i = 0; i < candidates.Length; i++)
             {
-                return engine;
+                if (File.Exists(candidates[i]))
+                {
+                    return candidates[i];
+                }
             }
 
             throw new FileNotFoundException(
-                "缺少下载引擎 N_m3u8DL-CLI-engine.exe，请保持软件目录完整。",
-                engine);
+                "缺少下载引擎 runtime\\N_m3u8DL-CLI-engine.exe，请保持软件目录完整。",
+                candidates[0]);
+        }
+
+        /// <summary>界面资源路径：优先 assets\，兼容旧版 bin\。</summary>
+        internal static string AssetPath(string fileName)
+        {
+            string root = AppDir();
+            string[] dirs = new string[] { "assets", "bin" };
+            for (int i = 0; i < dirs.Length; i++)
+            {
+                string candidate = Path.Combine(root, dirs[i], fileName);
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+            return Path.Combine(root, "assets", fileName);
         }
 
         internal static ProcessStartInfo EngineStartInfo(string arguments)
         {
             string root = AppDir();
-            string supportDir = Path.Combine(root, "bin");
+            string runtime = RuntimeDir();
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = EnginePath();
             startInfo.Arguments = arguments ?? "";
@@ -123,11 +158,20 @@ namespace N_m3u8DL_Gui
             startInfo.CreateNoWindow = true;
 
             string currentPath = Environment.GetEnvironmentVariable("PATH") ?? "";
-            string supportPath = Path.GetFullPath(supportDir);
-            string rootPath = Path.GetFullPath(root);
-            startInfo.EnvironmentVariables["PATH"] =
-                rootPath + Path.PathSeparator +
-                supportPath + Path.PathSeparator + currentPath;
+            StringBuilder pathBuilder = new StringBuilder();
+            string custom = CustomFfmpegDir;
+            if (!string.IsNullOrEmpty(custom) &&
+                File.Exists(Path.Combine(custom, "ffmpeg.exe")))
+            {
+                pathBuilder.Append(Path.GetFullPath(custom));
+                pathBuilder.Append(Path.PathSeparator);
+            }
+            pathBuilder.Append(Path.GetFullPath(root));
+            pathBuilder.Append(Path.PathSeparator);
+            pathBuilder.Append(Path.GetFullPath(runtime));
+            pathBuilder.Append(Path.PathSeparator);
+            pathBuilder.Append(currentPath);
+            startInfo.EnvironmentVariables["PATH"] = pathBuilder.ToString();
             startInfo.EnvironmentVariables["NM3U8DL_CLI_GUI"] = "1";
             startInfo.EnvironmentVariables["NM3U8DL_CLI_ROOT"] = root;
             return startInfo;
@@ -138,10 +182,7 @@ namespace N_m3u8DL_Gui
             try
             {
                 string root = AppDir();
-                string support = Path.Combine(root, "bin");
-                string logs = Path.Combine(root, "Logs");
-                Directory.CreateDirectory(support);
-                Directory.CreateDirectory(logs);
+                Directory.CreateDirectory(Path.Combine(root, "Logs"));
                 MoveEngineLogsToRoot();
                 RemoveEmptyEngineLogDirectory();
             }
@@ -154,49 +195,82 @@ namespace N_m3u8DL_Gui
         {
             string root = AppDir();
             Directory.CreateDirectory(Path.Combine(root, "Logs"));
-            Directory.CreateDirectory(Path.Combine(root, "bin", "Logs"));
+            try
+            {
+                string engineDir = Path.GetDirectoryName(EnginePath());
+                if (!string.IsNullOrEmpty(engineDir))
+                {
+                    Directory.CreateDirectory(Path.Combine(engineDir, "bin", "Logs"));
+                }
+            }
+            catch
+            {
+            }
         }
 
+        /// <summary>把引擎写在 runtime\ 或旧版 bin\ 下的日志搬到根目录 Logs。</summary>
         internal static void MoveEngineLogsToRoot()
         {
             lock (LogMoveLock)
             {
+                string root = AppDir();
+                string destination = Path.Combine(root, "Logs");
                 try
                 {
-                    string root = AppDir();
-                    string source = Path.Combine(root, "bin", "Logs");
-                    string destination = Path.Combine(root, "Logs");
-                    if (!Directory.Exists(source))
-                    {
-                        return;
-                    }
                     Directory.CreateDirectory(destination);
-                    string[] files = Directory.GetFiles(source);
-                    for (int i = 0; i < files.Length; i++)
-                    {
-                        try
-                        {
-                            string target = Path.Combine(
-                                destination,
-                                Path.GetFileName(files[i]));
-                            if (File.Exists(target))
-                            {
-                                target = Path.Combine(
-                                    destination,
-                                    Path.GetFileNameWithoutExtension(files[i]) +
-                                    "_" + DateTime.Now.ToString("yyyyMMddHHmmssfff") +
-                                    Path.GetExtension(files[i]));
-                            }
-                            File.Move(files[i], target);
-                        }
-                        catch (IOException)
-                        {
-                        }
-                    }
                 }
                 catch
                 {
+                    return;
                 }
+
+                string engineDir = RuntimeDir();
+                string[] sources = new string[]
+                {
+                    Path.Combine(engineDir, "bin", "Logs"),
+                    Path.Combine(engineDir, "Logs"),
+                    Path.Combine(root, "bin", "Logs")
+                };
+                for (int i = 0; i < sources.Length; i++)
+                {
+                    MoveLogFiles(sources[i], destination);
+                }
+            }
+        }
+
+        private static void MoveLogFiles(string source, string destination)
+        {
+            try
+            {
+                if (!Directory.Exists(source))
+                {
+                    return;
+                }
+                string[] files = Directory.GetFiles(source);
+                for (int i = 0; i < files.Length; i++)
+                {
+                    try
+                    {
+                        string target = Path.Combine(
+                            destination,
+                            Path.GetFileName(files[i]));
+                        if (File.Exists(target))
+                        {
+                            target = Path.Combine(
+                                destination,
+                                Path.GetFileNameWithoutExtension(files[i]) +
+                                "_" + DateTime.Now.ToString("yyyyMMddHHmmssfff") +
+                                Path.GetExtension(files[i]));
+                        }
+                        File.Move(files[i], target);
+                    }
+                    catch (IOException)
+                    {
+                    }
+                }
+            }
+            catch
+            {
             }
         }
 
@@ -204,19 +278,30 @@ namespace N_m3u8DL_Gui
         {
             lock (LogMoveLock)
             {
-                try
+                string root = AppDir();
+                string engineDir = RuntimeDir();
+                // 引擎会在自己目录下建 bin\Logs 和 Videos，搬空后一并收掉
+                RemoveEmptyDirectory(Path.Combine(engineDir, "bin", "Logs"));
+                RemoveEmptyDirectory(Path.Combine(engineDir, "bin"));
+                RemoveEmptyDirectory(Path.Combine(engineDir, "Logs"));
+                RemoveEmptyDirectory(Path.Combine(engineDir, "Videos"));
+                RemoveEmptyDirectory(Path.Combine(root, "bin", "Logs"));
+            }
+        }
+
+        private static void RemoveEmptyDirectory(string path)
+        {
+            try
+            {
+                if (Directory.Exists(path) &&
+                    Directory.GetFiles(path).Length == 0 &&
+                    Directory.GetDirectories(path).Length == 0)
                 {
-                    string path = Path.Combine(AppDir(), "bin", "Logs");
-                    if (Directory.Exists(path) &&
-                        Directory.GetFiles(path).Length == 0 &&
-                        Directory.GetDirectories(path).Length == 0)
-                    {
-                        Directory.Delete(path, false);
-                    }
+                    Directory.Delete(path, false);
                 }
-                catch
-                {
-                }
+            }
+            catch
+            {
             }
         }
 
@@ -307,7 +392,7 @@ namespace N_m3u8DL_Gui
             Status = value;
             if (Item != null && Item.SubItems.Count > 3)
             {
-                Item.SubItems[3].Text = value;
+                Item.SubItems[3].Text = Lang.Status(value);
             }
         }
 
@@ -336,60 +421,112 @@ namespace N_m3u8DL_Gui
         }
     }
 
-    internal sealed class MainForm : Form
+    internal sealed partial class MainForm : Form
     {
-        private enum ThemeMode
-        {
-            System,
-            Light,
-            Dark
-        }
+        private const int MaxReconnectAttempts = 5;
+        private const string AppTitle = "m3u8DL-GUI";
+        // 版本号唯一来源：bin\src\AssemblyInfo.cs 的 AssemblyVersion
+        private static readonly string AppVersion =
+            typeof(MainForm).Assembly.GetName().Version.ToString(3);
+        private const string RepoUrl = "https://github.com/NILNILL/m3u8DL-GUI";
 
+        // —— 数据 ——
+        private readonly List<DownloadJob> jobs = new List<DownloadJob>();
+        private readonly Dictionary<DownloadJob, ProgressLogLine> progressLogLines =
+            new Dictionary<DownloadJob, ProgressLogLine>();
+        private readonly string videosDir;
+        private readonly string settingsPath;
+
+        // —— 状态 ——
+        private ThemeMode themeMode = ThemeMode.System;
+        private AccentKind accentKind = AccentKind.FishBlue;
+        private LangMode langMode = LangMode.System;
+        private int ffmpegMode;          // 0 = 软件目录，1 = 自定义目录
+        private string ffmpegDir = "";
+        private int threadsValue = 16;
+        private decimal speedValue;
+        private bool alwaysOnTop;
+        private bool deleteAfterDone = true;
+        private bool continueAfterRetryLimit;
+        private bool resetRetryOnReconnect;
+        private bool currentDark;
+        private bool initialized;
+        private UiPalette palette;
+        private System.Windows.Forms.Timer systemThemeTimer;
+        private System.Windows.Forms.Timer pageTimer;
+        private int pageTarget;
+        private float pageT;
+        private ToolTip tips;
+
+        // —— 布局骨架 ——
+        private Panel rail;
+        private Panel headerBar;
+        private Panel pageHost;
+        private Panel downloadPage;
+        private Panel settingsPage;
+        private Panel settingsNav;
+        private Panel settingsBody;
+        private Panel themePane;
+        private Panel aboutPane;
+        private Panel statusBar;
+        private SoftCard cardParams;
+        private SoftCard cardTasks;
+        private SoftCard cardProgress;
+        private SoftCard cardAccent;
+        private SoftCard cardMode;
+        private SoftCard cardAbout;
+
+        // —— 控件 ——
         private TextBox txtUrl;
         private TextBox txtName;
         private TextBox txtDir;
         private TextBox txtProxy;
-        private NumericUpDown numThreads;
-        private NumericUpDown numMaxSpeed;
-        private Button btnDownload;
-        private Button btnStop;
-        private Button btnRemove;
-        private Button btnClear;
-        private Button btnBrowse;
-        private Button btnOpen;
-        private CheckBox chkDelAfterDone;
-        private CheckBox chkInfiniteRetry;
-        private CheckBox chkResetRetryOnReconnect;
+        private SoftNumber numThreads;
+        private SoftNumber numMaxSpeed;
+        private SoftField fieldUrl;
+        private SoftField fieldName;
+        private SoftField fieldThread;
+        private SoftField fieldSpeed;
+        private SoftField fieldProxy;
+        private SoftField fieldDir;
+        private SoftField fieldLog;
+        private SoftButton btnDownload;
+        private SoftButton btnStop;
+        private SoftButton btnRemove;
+        private SoftButton btnClear;
+        private SoftButton btnBrowse;
+        private SoftButton btnOpen;
+        private SoftIconButton btnSettings;
+        private SoftCheckBox chkDelAfterDone;
+        private SoftCheckBox chkInfiniteRetry;
+        private SoftCheckBox chkResetRetryOnReconnect;
+        private SoftCheckBox chkTopMost;
         private ListView lvTasks;
-        private ProgressBar progressBar;
+        private SoftBar progressBar;
         private Label lblSpeed;
         private Label lblProgress;
         private Label lblState;
-        private Label lblTheme;
+        private Label lblTitle;
+        private Label lblSubtitle;
+        private Label lblVersion;
+        private Label lblTasksTitle;
+        private Label lblProgressTitle;
+        private DotPanel stateBox;
         private RichTextBox txtLog;
-        private Panel stateBox;
-        private Panel themeBar;
-        private Panel statusBar;
-        private TableLayoutPanel mainLayout;
-        private ComboBox cboTheme;
-        private System.Windows.Forms.Timer systemThemeTimer;
-        private readonly Dictionary<DownloadJob, ProgressLogLine> progressLogLines =
-            new Dictionary<DownloadJob, ProgressLogLine>();
-        private const int MaxReconnectAttempts = 5;
-
-        private readonly List<DownloadJob> jobs = new List<DownloadJob>();
-        private readonly string videosDir;
-        private readonly string settingsPath;
-        private ThemeMode themeMode = ThemeMode.System;
-        private bool currentDark;
-        private bool initialized;
-        private Color themeWindow;
-        private Color themeSurface;
-        private Color themeInput;
-        private Color themeText;
-        private Color themeMuted;
-        private Color themeButton;
-        private Color themeBorder;
+        private PictureBox logo;
+        private RailButton navDownload;
+        private RailButton navSettings;
+        private SideItem sideTheme;
+        private SideItem sideAbout;
+        private SegmentedSwitch segMode;
+        private AccentSwatch swFish;
+        private AccentSwatch swClaude;
+        private Label lblThemeHeading;
+        private Label lblThemeDesc;
+        private Label lblModeHint;
+        private Label lblAboutVersion;
+        private Label lblAboutEngine;
+        private LinkLabel lnkRepo;
 
         private sealed class ProgressLogLine
         {
@@ -417,8 +554,9 @@ namespace N_m3u8DL_Gui
             videosDir = Path.Combine(Program.AppDir(), "Videos");
             settingsPath = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "N_m3u8DL-CLI",
+                "m3u8DL-GUI",
                 "settings.ini");
+            MigrateLegacySettings();
             try
             {
                 Directory.CreateDirectory(videosDir);
@@ -428,589 +566,50 @@ namespace N_m3u8DL_Gui
             }
 
             LoadSettings();
+            Lang.Setting = langMode;
+            Lang.Current = Lang.Resolve(langMode);
+            ApplyFfmpegSelection();
             BuildUi();
+            TopMost = alwaysOnTop;
             txtDir.Text = videosDir;
             initialized = true;
             ApplyTheme();
-            AppendLog("N_m3u8DL 图形界面已启动。");
+            AppendLog("m3u8DL-GUI 已启动。");
             AppendLog("下载时使用软件目录内的 ffmpeg.exe。");
             AppendLog("视频保存在: " + videosDir);
-            AppendLog("左上角可选择“跟随系统 / 浅色模式 / 深色模式”。");
+            AppendLog("左侧齿轮可打开设置，切换主题色与外观模式。");
         }
 
-        private void BuildUi()
+        /// <summary>旧版设置文件（N_m3u8DL-CLI 目录）存在时，复制过来以便沿用。</summary>
+        private void MigrateLegacySettings()
         {
-            Text = "N_m3u8DL 视频下载器";
-            StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(920, 760);
-            MinimumSize = new Size(860, 624);
-            Font = new Font("Microsoft YaHei UI", 9f);
-
             try
             {
-                string iconPath = Path.Combine(Program.AppDir(), "bin", "logo_3Iv_icon.ico");
-                if (File.Exists(iconPath))
+                if (File.Exists(settingsPath))
                 {
-                    Icon = new Icon(iconPath);
+                    return;
                 }
-                else
+                string legacy = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "N_m3u8DL-CLI",
+                    "settings.ini");
+                if (!File.Exists(legacy))
                 {
-                    Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                    return;
                 }
+                string directory = Path.GetDirectoryName(settingsPath);
+                if (!string.IsNullOrEmpty(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+                File.Copy(legacy, settingsPath, false);
             }
             catch
             {
             }
-
-            mainLayout = new TableLayoutPanel();
-            mainLayout.Dock = DockStyle.Fill;
-            mainLayout.ColumnCount = 1;
-            mainLayout.RowCount = 5;
-            mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28f));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 192f));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 250f));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30f));
-            Controls.Add(mainLayout);
-
-            mainLayout.Controls.Add(BuildThemeBar(), 0, 0);
-            mainLayout.Controls.Add(BuildTopPanel(), 0, 1);
-            mainLayout.Controls.Add(BuildTaskPanel(), 0, 2);
-            mainLayout.Controls.Add(BuildBottomPanel(), 0, 3);
-            mainLayout.Controls.Add(BuildStatusBar(), 0, 4);
-
-            systemThemeTimer = new System.Windows.Forms.Timer();
-            systemThemeTimer.Interval = 1500;
-            systemThemeTimer.Tick += delegate
-            {
-                if (themeMode == ThemeMode.System)
-                {
-                    bool systemDark = IsSystemDark();
-                    if (systemDark != currentDark)
-                    {
-                        ApplyTheme();
-                    }
-                }
-            };
-            systemThemeTimer.Start();
         }
 
-        private Control BuildThemeBar()
-        {
-            themeBar = new Panel();
-            themeBar.Dock = DockStyle.Fill;
-            themeBar.Padding = new Padding(0);
-
-            lblTheme = new Label();
-            lblTheme.Text = "主题:";
-            lblTheme.AutoSize = true;
-            lblTheme.Location = new Point(12, 5);
-
-            cboTheme = new ComboBox();
-            cboTheme.DropDownStyle = ComboBoxStyle.DropDownList;
-            cboTheme.AccessibleName = "主题模式";
-            cboTheme.Width = 112;
-            cboTheme.Location = new Point(56, 1);
-            cboTheme.Items.Add("跟随系统");
-            cboTheme.Items.Add("浅色模式");
-            cboTheme.Items.Add("深色模式");
-            cboTheme.SelectedIndex = (int)themeMode;
-            cboTheme.SelectedIndexChanged += delegate
-            {
-                if (!initialized)
-                {
-                    return;
-                }
-                themeMode = (ThemeMode)cboTheme.SelectedIndex;
-                SaveSettings();
-                ApplyTheme();
-            };
-
-            themeBar.Controls.Add(lblTheme);
-            themeBar.Controls.Add(cboTheme);
-            return themeBar;
-        }
-
-        private Control BuildTopPanel()
-        {
-            Panel panel = new Panel();
-            panel.Dock = DockStyle.Fill;
-            panel.Padding = new Padding(10);
-
-            Label urlLabel = MakeLabel("下载链接:", 12, 18);
-            txtUrl = new TextBox();
-            txtUrl.AccessibleName = "下载链接";
-            txtUrl.Location = new Point(92, 15);
-            txtUrl.Width = 800;
-            txtUrl.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-
-            Label nameLabel = MakeLabel("保存名称:", 12, 50);
-            txtName = new TextBox();
-            txtName.AccessibleName = "保存名称";
-            txtName.Location = new Point(92, 47);
-            txtName.Width = 160;
-
-            Label threadLabel = MakeLabel("线程:", 270, 50);
-            numThreads = new NumericUpDown();
-            numThreads.AccessibleName = "线程";
-            numThreads.Location = new Point(330, 47);
-            numThreads.Width = 56;
-            numThreads.Minimum = 1m;
-            numThreads.Maximum = 256m;
-            numThreads.Value = 16m;
-
-            Label speedLabel = MakeLabel("限速KB/s:", 404, 50);
-            numMaxSpeed = new NumericUpDown();
-            numMaxSpeed.AccessibleName = "限速KB/s";
-            numMaxSpeed.Location = new Point(488, 47);
-            numMaxSpeed.Width = 70;
-            numMaxSpeed.Minimum = 0m;
-            numMaxSpeed.Maximum = 100000000m;
-            numMaxSpeed.Value = 0m;
-
-            Label proxyLabel = MakeLabel("代理:", 576, 50);
-            txtProxy = new TextBox();
-            txtProxy.AccessibleName = "代理";
-            txtProxy.Location = new Point(614, 47);
-            txtProxy.Width = 294;
-            txtProxy.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-
-            Label dirLabel = MakeLabel("保存目录:", 12, 82);
-            txtDir = new TextBox();
-            txtDir.AccessibleName = "保存目录";
-            txtDir.Location = new Point(92, 79);
-            txtDir.Width = 640;
-            txtDir.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-
-            btnBrowse = MakeButton("浏览...", 748, 78, 70, 26);
-            btnBrowse.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            btnBrowse.Click += delegate
-            {
-                using (FolderBrowserDialog dialog = new FolderBrowserDialog())
-                {
-                    dialog.Description = "选择视频保存文件夹";
-                    if (Directory.Exists(txtDir.Text))
-                    {
-                        dialog.SelectedPath = txtDir.Text;
-                    }
-                    if (dialog.ShowDialog(this) == DialogResult.OK)
-                    {
-                        txtDir.Text = dialog.SelectedPath;
-                    }
-                }
-            };
-
-            btnOpen = MakeButton("打开", 824, 78, 68, 26);
-            btnOpen.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            btnOpen.Click += delegate
-            {
-                OpenFolder(CurrentVideosDir());
-            };
-
-            btnDownload = MakeButton("开始下载", 92, 116, 120, 34);
-            btnDownload.AccessibleName = "开始下载";
-            btnDownload.Click += delegate
-            {
-                StartDownload();
-            };
-
-            btnStop = MakeButton("停止选中", 220, 116, 100, 34);
-            btnStop.AccessibleName = "停止选中";
-            btnStop.Click += delegate
-            {
-                StopSelected();
-            };
-
-            btnRemove = MakeButton("删除选中", 328, 116, 100, 34);
-            btnRemove.AccessibleName = "删除选中";
-            btnRemove.Click += delegate
-            {
-                RemoveSelected();
-            };
-
-            btnClear = MakeButton("清空已完成", 436, 116, 110, 34);
-            btnClear.AccessibleName = "清空已完成";
-            btnClear.Click += delegate
-            {
-                ClearFinished();
-            };
-
-            chkDelAfterDone = new CheckBox();
-            chkDelAfterDone.AccessibleName = "完成后删除临时分片文件";
-            chkDelAfterDone.Text = "完成后删除临时分片文件";
-            chkDelAfterDone.Location = new Point(560, 122);
-            chkDelAfterDone.AutoSize = true;
-            chkDelAfterDone.Checked = true;
-
-            chkInfiniteRetry = new CheckBox();
-            chkInfiniteRetry.AccessibleName = "达到重连上限后继续下载";
-            chkInfiniteRetry.Text = "达到重连上限后继续下载";
-            chkInfiniteRetry.Location = new Point(92, 158);
-            chkInfiniteRetry.AutoSize = true;
-
-            chkResetRetryOnReconnect = new CheckBox();
-            chkResetRetryOnReconnect.AccessibleName = "重连成功后重置次数";
-            chkResetRetryOnReconnect.Text = "重连成功后重置次数";
-            chkResetRetryOnReconnect.Location = new Point(365, 158);
-            chkResetRetryOnReconnect.AutoSize = true;
-
-            panel.Controls.Add(urlLabel);
-            panel.Controls.Add(txtUrl);
-            panel.Controls.Add(nameLabel);
-            panel.Controls.Add(txtName);
-            panel.Controls.Add(threadLabel);
-            panel.Controls.Add(numThreads);
-            panel.Controls.Add(speedLabel);
-            panel.Controls.Add(numMaxSpeed);
-            panel.Controls.Add(proxyLabel);
-            panel.Controls.Add(txtProxy);
-            panel.Controls.Add(dirLabel);
-            panel.Controls.Add(txtDir);
-            panel.Controls.Add(btnBrowse);
-            panel.Controls.Add(btnOpen);
-            panel.Controls.Add(btnDownload);
-            panel.Controls.Add(btnStop);
-            panel.Controls.Add(btnRemove);
-            panel.Controls.Add(btnClear);
-            panel.Controls.Add(chkDelAfterDone);
-            panel.Controls.Add(chkInfiniteRetry);
-            panel.Controls.Add(chkResetRetryOnReconnect);
-            panel.Resize += delegate
-            {
-                LayoutTop(panel);
-            };
-            LayoutTop(panel);
-            return panel;
-        }
-
-        private void LayoutTop(Panel panel)
-        {
-            int width = panel.ClientSize.Width;
-            txtUrl.Width = Math.Max(80, width - 92 - 12);
-            txtProxy.Width = Math.Max(80, width - 614 - 12);
-            txtDir.Width = Math.Max(80, width - 92 - 12 - 80 - 80);
-            btnBrowse.Left = width - 12 - 80 - 68 - 4;
-            btnOpen.Left = width - 12 - 68;
-        }
-
-        private Control BuildTaskPanel()
-        {
-            Panel panel = new Panel();
-            panel.Dock = DockStyle.Fill;
-            panel.Padding = new Padding(10, 0, 10, 0);
-
-            lvTasks = new ListView();
-            lvTasks.AccessibleName = "下载任务";
-            lvTasks.Dock = DockStyle.Fill;
-            lvTasks.View = View.Details;
-            lvTasks.OwnerDraw = true;
-            lvTasks.FullRowSelect = true;
-            lvTasks.GridLines = true;
-            lvTasks.HideSelection = false;
-            lvTasks.MultiSelect = false;
-            lvTasks.DrawColumnHeader += DrawTaskColumnHeader;
-            lvTasks.DrawItem += DrawTaskItem;
-            lvTasks.DrawSubItem += DrawTaskSubItem;
-            lvTasks.Columns.Add("名称", 300);
-            lvTasks.Columns.Add("进度", 90);
-            lvTasks.Columns.Add("速度", 130);
-            lvTasks.Columns.Add("状态", 110);
-            lvTasks.Columns.Add("地址", 240);
-            lvTasks.Resize += delegate
-            {
-                int fixedWidth = 300 + 90 + 130 + 110;
-                lvTasks.Columns[4].Width =
-                    Math.Max(120, lvTasks.ClientSize.Width - fixedWidth - 2);
-            };
-            lvTasks.SelectedIndexChanged += delegate
-            {
-                RefreshSelection();
-            };
-            lvTasks.DoubleClick += delegate
-            {
-                DownloadJob job = SelectedJob();
-                if (job != null)
-                {
-                    OpenFolder(job.WorkDir);
-                }
-            };
-            panel.Controls.Add(lvTasks);
-            return panel;
-        }
-
-        private void DrawTaskColumnHeader(
-            object sender,
-            DrawListViewColumnHeaderEventArgs e)
-        {
-            Color background = currentDark
-                ? Color.FromArgb(56, 60, 65)
-                : Color.FromArgb(243, 245, 247);
-            Color foreground = currentDark
-                ? Color.FromArgb(205, 209, 214)
-                : Color.FromArgb(55, 59, 65);
-            using (SolidBrush brush = new SolidBrush(background))
-            {
-                e.Graphics.FillRectangle(brush, e.Bounds);
-            }
-            Rectangle textBounds = Rectangle.Inflate(e.Bounds, -6, 0);
-            TextRenderer.DrawText(
-                e.Graphics,
-                e.Header.Text,
-                e.Font,
-                textBounds,
-                foreground,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
-                TextFormatFlags.EndEllipsis);
-            using (Pen pen = new Pen(themeBorder))
-            {
-                e.Graphics.DrawLine(
-                    pen,
-                    e.Bounds.Right - 1,
-                    e.Bounds.Top,
-                    e.Bounds.Right - 1,
-                    e.Bounds.Bottom - 1);
-            }
-        }
-
-        private void DrawTaskItem(object sender, DrawListViewItemEventArgs e)
-        {
-            if (!currentDark)
-            {
-                e.DrawDefault = true;
-                return;
-            }
-            Color background = e.Item.Selected
-                ? Color.FromArgb(67, 77, 88)
-                : themeSurface;
-            using (SolidBrush brush = new SolidBrush(background))
-            {
-                e.Graphics.FillRectangle(brush, e.Bounds);
-            }
-        }
-
-        private void DrawTaskSubItem(object sender, DrawListViewSubItemEventArgs e)
-        {
-            if (!currentDark)
-            {
-                e.DrawDefault = true;
-                return;
-            }
-            Color background = e.Item.Selected
-                ? Color.FromArgb(67, 77, 88)
-                : themeSurface;
-            Color foreground = e.Item.Selected
-                ? Color.FromArgb(229, 232, 235)
-                : themeText;
-            using (SolidBrush brush = new SolidBrush(background))
-            {
-                e.Graphics.FillRectangle(brush, e.Bounds);
-            }
-            Rectangle textBounds = Rectangle.Inflate(e.Bounds, -6, 0);
-            TextRenderer.DrawText(
-                e.Graphics,
-                e.SubItem.Text,
-                e.SubItem.Font,
-                textBounds,
-                foreground,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
-                TextFormatFlags.EndEllipsis);
-            using (Pen pen = new Pen(themeBorder))
-            {
-                e.Graphics.DrawLine(
-                    pen,
-                    e.Bounds.Right - 1,
-                    e.Bounds.Top,
-                    e.Bounds.Right - 1,
-                    e.Bounds.Bottom - 1);
-                e.Graphics.DrawLine(
-                    pen,
-                    e.Bounds.Left,
-                    e.Bounds.Bottom - 1,
-                    e.Bounds.Right - 1,
-                    e.Bounds.Bottom - 1);
-            }
-        }
-
-        private Control BuildBottomPanel()
-        {
-            Panel panel = new Panel();
-            panel.Dock = DockStyle.Fill;
-            panel.Padding = new Padding(10);
-
-            progressBar = new ProgressBar();
-            progressBar.Location = new Point(12, 10);
-            progressBar.Width = 876;
-            progressBar.Height = 18;
-            progressBar.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-
-            lblSpeed = new Label();
-            lblSpeed.Text = "速度:  --";
-            lblSpeed.AutoSize = false;
-            lblSpeed.AutoEllipsis = true;
-            lblSpeed.TextAlign = ContentAlignment.MiddleLeft;
-            lblSpeed.Location = new Point(12, 34);
-            lblSpeed.Size = new Size(240, 20);
-            lblSpeed.Font = new Font(Font, FontStyle.Bold);
-
-            lblProgress = new Label();
-            lblProgress.Text = "进度:  --";
-            lblProgress.AutoSize = false;
-            lblProgress.AutoEllipsis = true;
-            lblProgress.TextAlign = ContentAlignment.MiddleLeft;
-            lblProgress.Location = new Point(264, 34);
-            lblProgress.Size = new Size(250, 20);
-
-            stateBox = new Panel();
-            stateBox.Location = new Point(526, 37);
-            stateBox.Size = new Size(12, 12);
-            stateBox.Tag = "color-swatch";
-
-            lblState = new Label();
-            lblState.Text = "状态:  就绪";
-            lblState.AutoSize = false;
-            lblState.AutoEllipsis = true;
-            lblState.TextAlign = ContentAlignment.MiddleLeft;
-            lblState.Location = new Point(544, 34);
-            lblState.Size = new Size(344, 20);
-
-            int legendX = 12;
-            legendX = AddLogLegend(
-                panel, legendX, 62, Color.FromArgb(200, 205, 212), "信息");
-            legendX = AddLogLegend(
-                panel, legendX, 62, Color.FromArgb(70, 200, 120), "成功");
-            legendX = AddLogLegend(
-                panel, legendX, 62, Color.FromArgb(240, 175, 60), "警告");
-            AddLogLegend(
-                panel, legendX, 62, Color.FromArgb(240, 100, 100), "失败");
-
-            txtLog = new RichTextBox();
-            txtLog.Location = new Point(12, 86);
-            txtLog.Width = 876;
-            txtLog.Height = 158;
-            txtLog.ReadOnly = true;
-            txtLog.ScrollBars = RichTextBoxScrollBars.Vertical;
-            txtLog.WordWrap = false;
-            txtLog.BorderStyle = BorderStyle.FixedSingle;
-            txtLog.Font = new Font("Consolas", 9f);
-            txtLog.DetectUrls = false;
-            txtLog.BackColor = Color.FromArgb(28, 30, 34);
-            txtLog.ForeColor = Color.Gainsboro;
-            txtLog.Anchor = AnchorStyles.Top | AnchorStyles.Bottom |
-                AnchorStyles.Left | AnchorStyles.Right;
-
-            panel.Controls.Add(progressBar);
-            panel.Controls.Add(lblSpeed);
-            panel.Controls.Add(lblProgress);
-            panel.Controls.Add(stateBox);
-            panel.Controls.Add(lblState);
-            panel.Controls.Add(txtLog);
-            panel.Resize += delegate
-            {
-                LayoutBottomInfo(panel);
-            };
-            LayoutBottomInfo(panel);
-            return panel;
-        }
-
-        private void LayoutBottomInfo(Panel panel)
-        {
-            int width = panel.ClientSize.Width;
-            int height = panel.ClientSize.Height;
-            int available = Math.Max(200, width - 24);
-            int speedWidth = Math.Max(280, (int)(available * 0.34));
-            int progressWidth = Math.Max(300, (int)(available * 0.38));
-
-            progressBar.Width = available;
-            lblSpeed.SetBounds(12, 34, speedWidth, 20);
-            lblProgress.SetBounds(
-                12 + speedWidth + 16,
-                34,
-                progressWidth,
-                20);
-            int stateLeft = 12 + speedWidth + progressWidth + 36;
-            stateBox.Location = new Point(stateLeft, 37);
-            lblState.SetBounds(
-                stateLeft + 20,
-                34,
-                Math.Max(80, width - stateLeft - 32),
-                20);
-            txtLog.Width = available;
-            txtLog.Height = Math.Max(40, height - 98);
-        }
-
-        private static int AddLogLegend(
-            Panel host,
-            int left,
-            int top,
-            Color color,
-            string text)
-        {
-            Panel marker = new Panel();
-            marker.Location = new Point(left, top + 2);
-            marker.Size = new Size(12, 12);
-            marker.BackColor = color;
-            marker.Tag = "color-swatch";
-
-            Label label = new Label();
-            label.Text = text;
-            label.AutoSize = true;
-            label.Location = new Point(left + 17, top - 1);
-
-            host.Controls.Add(marker);
-            host.Controls.Add(label);
-            return left + 17 + TextRenderer.MeasureText(text, host.Font).Width + 18;
-        }
-
-        private Control BuildStatusBar()
-        {
-            statusBar = new Panel();
-            statusBar.Dock = DockStyle.Fill;
-
-            Panel line = new Panel();
-            line.Dock = DockStyle.Top;
-            line.Height = 1;
-            line.Tag = "status-line";
-
-            Label developer = new Label();
-            developer.Text = "开发者:NIL";
-            developer.AutoSize = true;
-            developer.Location = new Point(12, 7);
-
-            Label version = new Label();
-            version.Text = "version:1.1.0";
-            version.AutoSize = true;
-            version.Location = new Point(850, 7);
-
-            statusBar.Controls.Add(line);
-            statusBar.Controls.Add(developer);
-            statusBar.Controls.Add(version);
-            statusBar.Resize += delegate
-            {
-                version.Left = Math.Max(12, statusBar.ClientSize.Width - version.Width - 12);
-            };
-            return statusBar;
-        }
-
-        private Label MakeLabel(string text, int left, int top)
-        {
-            Label label = new Label();
-            label.Text = text;
-            label.AutoSize = true;
-            label.Location = new Point(left, top);
-            return label;
-        }
-
-        private Button MakeButton(string text, int left, int top, int width, int height)
-        {
-            Button button = new Button();
-            button.Text = text;
-            button.Location = new Point(left, top);
-            button.Size = new Size(width, height);
-            return button;
-        }
-
-        private static string ActualText(TextBox textBox)
+                private static string ActualText(TextBox textBox)
         {
             return textBox.Text.Trim();
         }
@@ -1039,7 +638,7 @@ namespace N_m3u8DL_Gui
             string url = ActualText(txtUrl);
             if (string.IsNullOrEmpty(url))
             {
-                MessageBox.Show(this, "请输入下载链接。", "提示",
+                MessageBox.Show(this, Lang.Translate("请输入下载链接。"), Lang.Translate("提示"),
                     MessageBoxButtons.OK, MessageBoxIcon.Asterisk);
                 txtUrl.Focus();
                 return;
@@ -1048,8 +647,8 @@ namespace N_m3u8DL_Gui
                 !url.StartsWith("file:", StringComparison.OrdinalIgnoreCase) &&
                 !File.Exists(url) &&
                 MessageBox.Show(this,
-                    "链接看起来不是 http(s) 地址，仍要尝试下载吗？",
-                    "确认",
+                    Lang.Translate("链接看起来不是 http(s) 地址，仍要尝试下载吗？"),
+                    Lang.Translate("确认"),
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Question) != DialogResult.Yes)
             {
@@ -1092,8 +691,8 @@ namespace N_m3u8DL_Gui
                 job.SetStatus("启动失败");
                 AppendLog("[失败] 启动下载进程失败: " + ex.Message);
                 MessageBox.Show(this,
-                    "启动下载进程失败:\r\n" + ex.Message,
-                    "错误",
+                    Lang.Translate("启动下载进程失败:") + "\r\n" + ex.Message,
+                    Lang.Translate("错误"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
@@ -1597,17 +1196,17 @@ namespace N_m3u8DL_Gui
             if (job == null)
             {
                 progressBar.Value = 0;
-                lblSpeed.Text = "速度:  --";
-                lblProgress.Text = "进度:  --";
-                lblState.Text = "状态:  就绪";
+                lblSpeed.Text = Lang.Translate("速度") + ":  --";
+                lblProgress.Text = Lang.Translate("进度") + ":  --";
+                lblState.Text = Lang.Translate("状态") + ":  " + Lang.Translate("就绪");
                 stateBox.BackColor = Color.Silver;
                 return;
             }
             progressBar.Value = Convert.ToInt32(Math.Max(0.0, Math.Min(100.0, job.Percent)));
-            lblSpeed.Text = "速度:  " + job.SpeedText;
-            lblProgress.Text = "进度:  " + job.Percent.ToString("0.00") + "%" +
+            lblSpeed.Text = Lang.Translate("速度") + ":  " + job.SpeedText;
+            lblProgress.Text = Lang.Translate("进度") + ":  " + job.Percent.ToString("0.00") + "%" +
                 (string.IsNullOrEmpty(job.SizeText) ? "" : "  (" + job.SizeText + ")");
-            lblState.Text = "状态:  " + job.Status;
+            lblState.Text = Lang.Translate("状态") + ":  " + Lang.Status(job.Status);
             stateBox.BackColor = StateColor(job.Status);
         }
 
@@ -1638,11 +1237,11 @@ namespace N_m3u8DL_Gui
             List<string> targets = BuildDeleteTargets(job);
             bool running = job.Proc != null && !HasExited(job.Proc);
             string message = running
-                ? "任务正在下载，停止后会删除任务及对应文件。\r\n\r\n"
-                : "将从任务列表删除，并删除以下下载内容：\r\n\r\n";
+                ? Lang.Translate("任务正在下载，停止后会删除任务及对应文件。") + "\r\n\r\n"
+                : Lang.Translate("将从任务列表删除，并删除以下下载内容：") + "\r\n\r\n";
             if (targets.Count == 0)
             {
-                message += "（当前没有检测到已生成的视频或分片文件）";
+                message += Lang.Translate("（当前没有检测到已生成的视频或分片文件）");
             }
             else
             {
@@ -1651,8 +1250,8 @@ namespace N_m3u8DL_Gui
                     message += "• " + targets[i] + "\r\n";
                 }
             }
-            message += "\r\n删除后无法恢复，是否继续？";
-            if (MessageBox.Show(this, message, "删除任务和文件",
+            message += "\r\n" + Lang.Translate("删除后无法恢复，是否继续？");
+            if (MessageBox.Show(this, message, Lang.Translate("删除任务和文件"),
                 MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
             {
                 return;
@@ -2084,7 +1683,7 @@ namespace N_m3u8DL_Gui
                     string line = lines[i].Trim();
                     if (line.StartsWith("theme=", StringComparison.OrdinalIgnoreCase))
                     {
-                        string value = line.Substring(6).Trim();
+                        string value = line.Substring(line.IndexOf('=') + 1).Trim();
                         if (string.Equals(value, "light", StringComparison.OrdinalIgnoreCase))
                         {
                             themeMode = ThemeMode.Light;
@@ -2098,6 +1697,99 @@ namespace N_m3u8DL_Gui
                             themeMode = ThemeMode.System;
                         }
                     }
+                    else if (line.StartsWith("accent=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string value = line.Substring(line.IndexOf('=') + 1).Trim();
+                        accentKind = string.Equals(
+                            value, "claude", StringComparison.OrdinalIgnoreCase)
+                            ? AccentKind.ClaudeOrange
+                            : AccentKind.FishBlue;
+                    }
+                    else if (line.StartsWith("lang=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string value = line.Substring(line.IndexOf('=') + 1).Trim();
+                        if (string.Equals(value, "zh-hans", StringComparison.OrdinalIgnoreCase))
+                        {
+                            langMode = LangMode.ZhHans;
+                        }
+                        else if (string.Equals(value, "zh-hant", StringComparison.OrdinalIgnoreCase))
+                        {
+                            langMode = LangMode.ZhHant;
+                        }
+                        else if (string.Equals(value, "en", StringComparison.OrdinalIgnoreCase))
+                        {
+                            langMode = LangMode.En;
+                        }
+                        else
+                        {
+                            langMode = LangMode.System;
+                        }
+                    }
+                    else if (line.StartsWith("threads=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int value;
+                        if (int.TryParse(
+                            line.Substring(line.IndexOf('=') + 1).Trim(),
+                            out value) && value >= 1 && value <= 256)
+                        {
+                            threadsValue = value;
+                        }
+                    }
+                    else if (line.StartsWith("max_speed=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        decimal value;
+                        if (decimal.TryParse(
+                            line.Substring(line.IndexOf('=') + 1).Trim(),
+                            out value) && value >= 0m)
+                        {
+                            speedValue = value;
+                        }
+                    }
+                    else if (line.StartsWith("ffmpeg_mode=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string value = line.Substring(line.IndexOf('=') + 1).Trim();
+                        ffmpegMode = string.Equals(value, "custom", StringComparison.OrdinalIgnoreCase)
+                            ? 1
+                            : 0;
+                    }
+                    else if (line.StartsWith("ffmpeg_dir=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ffmpegDir = line.Substring(line.IndexOf('=') + 1).Trim();
+                    }
+                    else if (line.StartsWith("topmost=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        alwaysOnTop = string.Equals(
+                            line.Substring(line.IndexOf('=') + 1).Trim(),
+                            "true",
+                            StringComparison.OrdinalIgnoreCase);
+                    }
+                    else if (line.StartsWith(
+                        "delete_after_done=",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        deleteAfterDone = string.Equals(
+                            line.Substring(line.IndexOf('=') + 1).Trim(),
+                            "true",
+                            StringComparison.OrdinalIgnoreCase);
+                    }
+                    else if (line.StartsWith(
+                        "continue_after_retry_limit=",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        continueAfterRetryLimit = string.Equals(
+                            line.Substring(line.IndexOf('=') + 1).Trim(),
+                            "true",
+                            StringComparison.OrdinalIgnoreCase);
+                    }
+                    else if (line.StartsWith(
+                        "reset_retry_on_reconnect=",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        resetRetryOnReconnect = string.Equals(
+                            line.Substring(line.IndexOf('=') + 1).Trim(),
+                            "true",
+                            StringComparison.OrdinalIgnoreCase);
+                    }
                 }
             }
             catch
@@ -2110,15 +1802,60 @@ namespace N_m3u8DL_Gui
             try
             {
                 string directory = Path.GetDirectoryName(settingsPath);
-                Directory.CreateDirectory(directory);
-                string value = themeMode == ThemeMode.Light
+                if (!string.IsNullOrEmpty(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+                string theme = themeMode == ThemeMode.Light
                     ? "light"
                     : themeMode == ThemeMode.Dark ? "dark" : "system";
-                File.WriteAllText(settingsPath, "theme=" + value + Environment.NewLine,
+                string accent = accentKind == AccentKind.ClaudeOrange
+                    ? "claude"
+                    : "fish";
+                string lang = langMode == LangMode.ZhHans
+                    ? "zh-hans"
+                    : langMode == LangMode.ZhHant ? "zh-hant"
+                    : langMode == LangMode.En ? "en" : "system";
+                File.WriteAllText(
+                    settingsPath,
+                    "theme=" + theme + Environment.NewLine +
+                    "accent=" + accent + Environment.NewLine +
+                    "lang=" + lang + Environment.NewLine +
+                    "ffmpeg_mode=" + (ffmpegMode == 1 ? "custom" : "bundled") +
+                    Environment.NewLine +
+                    "ffmpeg_dir=" + ffmpegDir + Environment.NewLine +
+                    "threads=" + threadsValue.ToString() + Environment.NewLine +
+                    "max_speed=" + speedValue.ToString("0") + Environment.NewLine +
+                    "topmost=" + (alwaysOnTop ? "true" : "false") +
+                    Environment.NewLine +
+                    "delete_after_done=" +
+                    (deleteAfterDone ? "true" : "false") +
+                    Environment.NewLine +
+                    "continue_after_retry_limit=" +
+                    (continueAfterRetryLimit ? "true" : "false") +
+                    Environment.NewLine +
+                    "reset_retry_on_reconnect=" +
+                    (resetRetryOnReconnect ? "true" : "false") +
+                    Environment.NewLine,
                     Encoding.UTF8);
             }
             catch
             {
+            }
+        }
+
+        /// <summary>把设置里的 ffmpeg 选择同步到 Program（引擎启动时读它）。</summary>
+        private void ApplyFfmpegSelection()
+        {
+            if (ffmpegMode == 1 &&
+                !string.IsNullOrEmpty(ffmpegDir) &&
+                File.Exists(Path.Combine(ffmpegDir, "ffmpeg.exe")))
+            {
+                Program.CustomFfmpegDir = ffmpegDir;
+            }
+            else
+            {
+                Program.CustomFfmpegDir = "";
             }
         }
 
@@ -2138,166 +1875,7 @@ namespace N_m3u8DL_Gui
             }
         }
 
-        private void ApplyTheme()
-        {
-            currentDark = themeMode == ThemeMode.Dark ||
-                (themeMode == ThemeMode.System && IsSystemDark());
-
-            Color window = currentDark
-                ? Color.FromArgb(43, 46, 50)
-                : Color.FromArgb(245, 246, 248);
-            Color surface = currentDark
-                ? Color.FromArgb(48, 52, 56)
-                : Color.White;
-            Color input = currentDark
-                ? Color.FromArgb(52, 56, 61)
-                : Color.White;
-            Color text = currentDark
-                ? Color.FromArgb(212, 215, 219)
-                : Color.FromArgb(34, 38, 44);
-            Color muted = currentDark
-                ? Color.FromArgb(174, 179, 185)
-                : Color.FromArgb(80, 85, 92);
-            Color button = currentDark
-                ? Color.FromArgb(58, 63, 69)
-                : SystemColors.Control;
-            Color border = currentDark
-                ? Color.FromArgb(74, 79, 86)
-                : Color.FromArgb(198, 204, 212);
-            themeWindow = window;
-            themeSurface = surface;
-            themeInput = input;
-            themeText = text;
-            themeMuted = muted;
-            themeButton = button;
-            themeBorder = border;
-
-            BackColor = window;
-            mainLayout.BackColor = window;
-            ApplyThemeToControls(this, window, surface, input, text, muted, button, border);
-
-            themeBar.BackColor = currentDark
-                ? Color.FromArgb(42, 45, 49)
-                : Color.FromArgb(235, 238, 242);
-            statusBar.BackColor = currentDark
-                ? Color.FromArgb(41, 44, 48)
-                : Color.FromArgb(232, 235, 239);
-            lblTheme.ForeColor = muted;
-            cboTheme.BackColor = input;
-            cboTheme.ForeColor = text;
-            lblSpeed.ForeColor = currentDark
-                ? Color.FromArgb(128, 190, 151)
-                : Color.FromArgb(0, 120, 60);
-            txtLog.BackColor = Color.FromArgb(28, 30, 34);
-            txtLog.ForeColor = Color.Gainsboro;
-            btnDownload.BackColor = currentDark
-                ? Color.FromArgb(79, 128, 190)
-                : Color.FromArgb(51, 122, 224);
-            btnDownload.ForeColor = Color.White;
-            btnDownload.FlatStyle = FlatStyle.Flat;
-            btnDownload.FlatAppearance.BorderSize = 0;
-            stateBox.BackColor = Color.Silver;
-            RefreshSelection();
-            ApplyNativeTitleBar();
-        }
-
-        private static void ApplyThemeToControls(
-            Control parent,
-            Color window,
-            Color surface,
-            Color input,
-            Color text,
-            Color muted,
-            Color button,
-            Color border)
-        {
-            for (int i = 0; i < parent.Controls.Count; i++)
-            {
-                Control control = parent.Controls[i];
-                string tag = control.Tag as string;
-                if (tag == "color-swatch")
-                {
-                    continue;
-                }
-
-                if (control is Panel || control is TableLayoutPanel)
-                {
-                    control.BackColor = window;
-                }
-                else if (control is TextBox || control is NumericUpDown ||
-                    control is ComboBox)
-                {
-                    control.BackColor = input;
-                    control.ForeColor =
-                        control is TextBox && object.Equals(control.Text, control.Tag)
-                        ? muted
-                        : text;
-                }
-                else if (control is ListView)
-                {
-                    control.BackColor = surface;
-                    control.ForeColor = text;
-                }
-                else if (control is Button)
-                {
-                    control.BackColor = button;
-                    control.ForeColor = text;
-                    ((Button)control).FlatAppearance.BorderColor = border;
-                }
-                else if (control is CheckBox)
-                {
-                    control.BackColor = window;
-                    control.ForeColor = text;
-                }
-                else if (control is Label)
-                {
-                    control.BackColor = Color.Transparent;
-                    control.ForeColor = muted;
-                }
-                else if (control is ProgressBar)
-                {
-                    control.BackColor = surface;
-                    control.ForeColor = Color.FromArgb(51, 122, 224);
-                }
-
-                if (tag == "status-line")
-                {
-                    control.BackColor = border;
-                }
-                ApplyThemeToControls(control, window, surface, input, text,
-                    muted, button, border);
-            }
-        }
-
-        private void ApplyNativeTitleBar()
-        {
-            if (!IsHandleCreated)
-            {
-                return;
-            }
-            try
-            {
-                int value = currentDark ? 1 : 0;
-                int result = NativeMethods.DwmSetWindowAttribute(
-                    Handle, 20, ref value, Marshal.SizeOf(typeof(int)));
-                if (result != 0)
-                {
-                    NativeMethods.DwmSetWindowAttribute(
-                        Handle, 19, ref value, Marshal.SizeOf(typeof(int)));
-                }
-            }
-            catch
-            {
-            }
-        }
-
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            ApplyTheme();
-        }
-
-        protected override void OnFormClosing(FormClosingEventArgs e)
+                protected override void OnFormClosing(FormClosingEventArgs e)
         {
             bool running = jobs.Any(delegate(DownloadJob job)
             {
@@ -2308,8 +1886,8 @@ namespace N_m3u8DL_Gui
             {
                 DialogResult result = MessageBox.Show(
                     this,
-                    "仍有下载任务正在运行，确定要退出并停止全部任务吗？",
-                    "确认退出",
+                    Lang.Translate("仍有下载任务正在运行，确定要退出并停止全部任务吗？"),
+                    Lang.Translate("确认退出"),
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Exclamation);
                 if (result != DialogResult.Yes)
