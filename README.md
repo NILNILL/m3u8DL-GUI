@@ -100,20 +100,19 @@ m3u8DL-GUI\
 
 说明：
 
-- 根目录只放主程序、ffmpeg、说明与 `Logs` / `Videos` 两个数据目录。
 - `runtime` 里的引擎和 DLL 必须放在一起，单独挪动会启动失败。
 - 引擎的日志会临时写在 `runtime\bin\Logs`，程序启动/退出时自动搬到根目录 `Logs` 并清理空目录。
 
 ## 仓库结构（GitHub）
 
-上传到 GitHub 时，仓库里额外包含开发用的源码、文档与验证工具：
+库里额外包含开发用的源码、文档与验证工具：
 
 ```text
 m3u8DL-GUI\
 ├── m3u8DL-GUI.exe
 ├── ffmpeg.exe
 ├── README.md
-├── AGENTS.md                    给 AI 协作者的项目约定（可删）
+├── AGENTS.md                    
 ├── .gitignore
 ├── .gitattributes
 ├── Logs\                        不纳入版本管理
